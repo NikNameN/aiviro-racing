@@ -82,8 +82,8 @@ const CARS = [
     acc: 1.08, steer: 0.94, inv: 2.0, trait: "Самый мощный, но крупный" },
 ];
 let carIdx = Math.max(0, Math.min(CARS.length - 1, parseInt(lsGetEarly("racingCar", "0"), 10) || 0));
-function car() { return CARS[carIdx]; }
-function applyCar() { CAR_W = car().w; CAR_L = car().l; }
+function curCar() { return CARS[carIdx]; }
+function applyCar() { CAR_W = curCar().w; CAR_L = curCar().l; }
 function changeCar(d) { carIdx = (carIdx + d + CARS.length) % CARS.length; lsSet("racingCar", carIdx); applyCar(); selAnim = d; sound("pass"); }
 function lsGetEarly(key, def) { try { const v = localStorage.getItem(key); return v === null ? def : v; } catch (e) { return def; } }
 let selAnim = 0, ui = {}, swipeX = null;
@@ -168,7 +168,7 @@ function newScenery(side, y) {
 }
 function initScenery() {
   scenery = [];
-  for (const side of [-1, 1]) { let y = H + 60; while (y > -200) { scenery.push(newScenery(side, y)); y -= rand(70, 140) * sceneryGap(); } }
+  for (const side of [-1, 1]) { let y = H + 60, guard = 0; while (y > -200 && guard++ < 500) { scenery.push(newScenery(side, y)); y -= rand(70, 140) * sceneryGap(); } }
 }
 function sceneryGap() { return Math.max(0.45, Math.min(1, 70 / ((W - ROAD_W) / 2))); }
 function sceneryTop(side) { let m = Infinity; for (const s of scenery) if (s.side === side && s.y < m) m = s.y; return m; }
@@ -180,7 +180,8 @@ function newCar(lane, y) {
   if (r < 0.55) { type = "car"; w = 27; l = 48; }
   else if (r < 0.75) { type = "van"; w = 29; l = 58; }
   else { type = "truck"; w = 32; l = 92; }
-  return { lane: lane, x: laneX(lane) + rand(-4, 4), y: y - l, w: w, l: l, type: type, color: pick(COLORS),
+  return { lane: lane, x: laneX(lane) + rand(-9, 9) * (lane === 0 || lane === LANES - 1 ? 0.6 : 1),   // смещение в полосе: «между рядами» не отсидеться
+            y: y - l, w: w, l: l, type: type, color: pick(COLORS),
            cab: pick(["#c62828", "#1565c0", "#f9a825", "#2e7d32", "#ef6c00", "#5e35b1"]),
            v: V_TRAFFIC, passed: false, crashed: false, vx: 0, rot: 0, vr: 0 };
 }
@@ -422,14 +423,14 @@ function boom(x, y, n, colors, spd) {
 }
 function smoke(x, y) { particles.push({ x: x + rand(-6, 6), y: y, vx: rand(-15, 15), vy: rand(20, 60), life: 0.9, max: 0.9, r: rand(5, 9), c: "smoke" }); }
 function popup(text, x, y, c) { popups.push({ text: text, x: x, y: y, t: 0.9, c: c || "#fff" }); }
-function crash(car) {
+function crash(hit) {   // hit — машина трафика, в которую врезались
   const px = CX + player.x;
-  car.crashed = true; car.vx = (CX + car.x < px ? -1 : 1) * rand(120, 200); car.vr = (car.vx > 0 ? 1 : -1) * rand(4, 7);
-  boom((px + CX + car.x) / 2, PLAYER_Y - CAR_L / 2, 34, ["#ffd54f", "#ff9800", "#fff", "#ff5722"], 260);
+  hit.crashed = true; hit.vx = (CX + hit.x < px ? -1 : 1) * rand(120, 200); hit.vr = (hit.vx > 0 ? 1 : -1) * rand(4, 7);
+  boom((px + CX + hit.x) / 2, PLAYER_Y - CAR_L / 2, 34, ["#ffd54f", "#ff9800", "#fff", "#ff5722"], 260);
   shake = 0.4; flash = 0.25; lives--; sound("crash");
   speed = baseSpeed = Math.max(V_START * 0.8, baseSpeed * 0.7); nitroT = 0; crashSlow = 0.5;
   wave.phase = "calm"; wave.t = 3;
-  if (lives <= 0) gameOver(); else { invuln = car().inv; popup("−1 жизнь", px, PLAYER_Y - 70, "#ff8a80"); }
+  if (lives <= 0) gameOver(); else { invuln = curCar().inv; popup("−1 жизнь", px, PLAYER_Y - 70, "#ff8a80"); }
 }
 function gameOver() {
   state = "over"; overLock = OVER_LOCK; player.spin = rand(-1, 1) > 0 ? 7 : -7;
@@ -445,7 +446,7 @@ function scroll(dt, v) {
   roadOff = (roadOff + v * dt) % 60;
   for (const s of scenery) s.y += v * dt;
   scenery = scenery.filter(s => s.y < H + 160);
-  for (const side of [-1, 1]) { let top = sceneryTop(side); while (top > -120) { top -= rand(70, 140) * sceneryGap(); scenery.push(newScenery(side, top)); } }
+  for (const side of [-1, 1]) { let top = sceneryTop(side), guard = 0; if (!isFinite(top)) top = H + 60; while (top > -120 && guard++ < 200) { top -= rand(70, 140) * sceneryGap(); scenery.push(newScenery(side, top)); } }
 }
 function update(dt) {
   animT += dt;
@@ -471,7 +472,7 @@ function update(dt) {
   if (state !== "playing") return;
 
   // Скорость: машина разгоняется всё время игры, нитро добавляет 90 км/ч
-  baseSpeed = Math.min(V_MAX, baseSpeed + accelAt(baseSpeed) * car().acc * dt);
+  baseSpeed = Math.min(V_MAX, baseSpeed + accelAt(baseSpeed) * curCar().acc * dt);
   updateDensity(dt);
   const mark = Math.floor(baseSpeed / SPEED_STEP) * SPEED_STEP;
   if (mark > speedMark) { speedMark = mark; popup("СКОРОСТЬ + " + mark + " км/ч", CX, PLAYER_Y - 90, "#ff9e40"); sound("pickup"); }
@@ -485,7 +486,7 @@ function update(dt) {
   scroll(dt, v);
 
   // Руль: плавное боковое движение, без прыжков по полосам
-  const LAT = (240 + rel() * 0.35) * car().steer;
+  const LAT = (240 + rel() * 0.35) * curCar().steer;
   let dir = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
   if (drag && drag.moved) {
     const want = Math.max(ROAD_L - CX + CAR_W / 2 + 4, Math.min(ROAD_R - CX - CAR_W / 2 - 4, drag.px0 + (drag.x - drag.x0) * 1.3));
@@ -744,7 +745,7 @@ function drawPlayer() {
   // свет фар
   ctx.fillStyle = "rgba(255,250,200,0.10)";
   ctx.beginPath(); ctx.moveTo(-CAR_W / 2 + 4, -CAR_L / 2); ctx.lineTo(-CAR_W / 2 - 10, -CAR_L / 2 - 70); ctx.lineTo(CAR_W / 2 + 10, -CAR_L / 2 - 70); ctx.lineTo(CAR_W / 2 - 4, -CAR_L / 2); ctx.closePath(); ctx.fill();
-  drawModel(car(), { logo: true });                                    // выбранная машина + наклейка Aiviro
+  drawModel(curCar(), { logo: true });                                    // выбранная машина + наклейка Aiviro
   ctx.restore(); ctx.globalAlpha = 1;
 }
 function drawPickup(p) {
@@ -842,7 +843,7 @@ function drawStart() {
   const avail = H - safe.t - safe.b, top = safe.t + Math.max(4, (avail - 600) / 2);
   drawLogo(CX, top + 34, 46);
   textC("AIVIRO RACING", CX, top + 80, 30, "#fff", 900, "#3d1f66");
-  const m = car(), py = top + 104, ph = 292, pw = Math.min(320, W - 24);
+  const m = curCar(), py = top + 104, ph = 292, pw = Math.min(320, W - 24);
   panel(CX - pw / 2, py, pw, ph);
   textC("ВЫБЕРИ МАШИНУ · " + (carIdx + 1) + " / " + CARS.length, CX, py + 18, 12, "#c9a6ff", 800);
   // машина крупно, со сдвигом-анимацией при смене
@@ -947,11 +948,17 @@ function tick(frameDt) {
   while (acc >= STEP && n < 20) { update(STEP); acc -= STEP; n++; }
 }
 let engTimer = 0;
+let loopErrors = 0;
 function loop(now) {
-  tick((now - lastTime) / 1000); lastTime = now;
-  if ((engTimer += 1) % 6 === 0) updateEngine();
-  draw();
-  requestAnimationFrame(loop);
+  requestAnimationFrame(loop);                 // следующий кадр планируем сразу — ошибка не остановит игру
+  try {
+    tick((now - lastTime) / 1000); lastTime = now;
+    if ((engTimer += 1) % 6 === 0) updateEngine();
+    draw();
+  } catch (e) {
+    lastTime = now; acc = 0;
+    if (loopErrors++ < 5) { try { console.warn("frame error:", e && e.message); } catch (e2) {} }
+  }
 }
 applyCar();
 resize();
