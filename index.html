@@ -186,7 +186,8 @@ function newCar(lane, y) {
   return { lane: lane, x: laneX(lane) + rand(-9, 9) * (lane === 0 || lane === LANES - 1 ? 0.6 : 1),   // смещение в полосе: «между рядами» не отсидеться
             y: y - l, w: w, l: l, type: type, color: pick(COLORS),
            cab: pick(["#c62828", "#1565c0", "#f9a825", "#2e7d32", "#ef6c00", "#5e35b1"]),
-           v: V_TRAFFIC, passed: false, crashed: false, vx: 0, rot: 0, vr: 0 };
+           v: V_TRAFFIC, passed: false, crashed: false, vx: 0, rot: 0, vr: 0,
+           row: rowCount, sig: 0, sigTo: lane, sigDir: 0, moveT: 0.8, mv: null };   // sig/mv — перестроение
 }
 // ----- Плотность потока -----
 // Базовый уровень растёт плавно со временем заезда: 1 − e^(−t/100)
@@ -240,12 +241,67 @@ function spawnRow() {
 }
 function rel() { return Math.max(0, speed - V_TRAFFIC) * KMH; }   // скорость потока относительно игрока, пикс/с
 
+// ----- Перестроения потока с поворотниками -----
+// Машина сначала мигает поворотником (0,9–1,3 с, 2,5 Гц), потом плавно уходит в соседнюю полосу (0,6–0,9 с, фура ×1,35).
+// Правила честности: машина в перестроении занимает обе полосы; рядом (±длина машины + 34 пикс по вертикали)
+// после перестроения должно остаться ≥ 1 свободной полосы; целевая полоса рядом должна быть пустой;
+// в полосу игрока — только если манёвр закончится заранее (не подрезаем).
+let laneChangeT = 4, laneChanges = 0;
+const LC_GAP = 34;
+function occLanes(o, s) { s.add(o.lane); if (o.mv) s.add(o.mv.to); if (o.sig > 0) s.add(o.sigTo); }
+function windowLanes(c, G) {
+  const s = new Set();
+  for (const o of traffic) { if (o.crashed || o.y > c.y + c.l + G || o.y + o.l < c.y - G) continue; occLanes(o, s); }
+  return s;
+}
+function rowFree(row) {
+  const s = new Set(); for (const o of traffic) if (!o.crashed && o.row === row) occLanes(o, s);
+  const f = [0, 1, 2, 3].filter(l => !s.has(l)); return f.length ? f : lastFree;
+}
+function tryLaneChange() {
+  const r = rel(); if (r <= 1) return false;
+  const hs = clamp((speed - 120) / 180, 0, 1), frontY = PLAYER_Y - CAR_L / 2;   // к 300 км/ч сигнал 0,9 с
+  const cands = [];
+  for (const c of traffic) {
+    if (c.crashed || c.passed || c.sig > 0 || c.mv || c.y + c.l < 4) continue;      // задние фонари уже видны
+    const sig = lerp(1.3, 0.9, hs) * rand(1, 1.08), moveT = lerp(0.9, 0.6, hs) * (c.type === "truck" ? 1.35 : 1);
+    const tReach = (frontY - (c.y + c.l)) / r;                                    // через сколько секунд машина поравняется с игроком
+    if (tReach < sig + 0.2) continue;                                             // поворотник успеют увидеть целиком
+    const G = c.l + LC_GAP;
+    for (const d of [-1, 1]) {
+      const b = c.lane + d; if (b < 0 || b >= LANES) continue;
+      const near = Math.abs(laneX(b) - player.x) < LANE_W * 0.95;
+      if (near && tReach < sig + moveT + 0.5) continue;                            // не подрезать перед носом
+      const occ = windowLanes(c, G); if (occ.has(b)) continue;                    // цель занята
+      occ.add(b); if (occ.size > 3) continue;                                     // одна полоса всегда свободна
+      cands.push({ c: c, b: b, d: d, sig: sig, moveT: moveT });
+    }
+  }
+  if (!cands.length) return false;
+  const q = pick(cands), c = q.c;
+  c.sig = q.sig; c.sigTo = q.b; c.sigDir = q.d; c.moveT = q.moveT; laneChanges++;
+  if (c.row === rowCount) lastFree = rowFree(rowCount);                           // новый ряд учтёт перестроение
+  return true;
+}
+function stepLaneChange(c, dt) {
+  if (c.sig > 0) {
+    c.sig -= dt;
+    if (c.sig <= 0) { c.sig = 0; c.mv = { to: c.sigTo, from: c.x, tx: laneX(c.sigTo) + rand(-5, 5) * (c.sigTo === 0 || c.sigTo === LANES - 1 ? 0.6 : 1), p: 0 }; }
+  } else if (c.mv) {
+    const m = c.mv; m.p = Math.min(1, m.p + dt / c.moveT);
+    const e = m.p * m.p * (3 - 2 * m.p);                                          // плавный старт и финиш
+    c.x = m.from + (m.tx - m.from) * e; c.rot = c.sigDir * Math.sin(Math.PI * m.p) * 0.1;
+    if (m.p >= 1) { c.lane = m.to; c.mv = null; c.rot = 0; c.sigDir = 0; if (c.row === rowCount) lastFree = rowFree(rowCount); }
+  }
+}
+
 // ----- Начало игры -----
 function startGame() {
   traffic = []; pickups = []; particles = []; popups = [];
   dist = 0; overtakes = 0; coinsTaken = 0; bonus = 0; lives = LIVES; newBest = false;
   speed = baseSpeed = V_START; speedMark = V_START; nitroT = 0; nitro = 40; invuln = 0; shake = 0; crashSlow = 0;
   rowDist = 0; nextRow = 200; rowCount = 0; lastFree = [0, 1, 2, 3];
+  laneChangeT = rand(3, 5); laneChanges = 0;
   playTime = 0; dens = 0; densTarget = 0; wave = { phase: "flow", t: rand(14, 20) };
   applyCar();
   player.x = laneX(1) + LANE_W / 2; player.vx = 0; player.ang = 0; player.spin = 0;
@@ -427,6 +483,7 @@ function boom(x, y, n, colors, spd) {
 function smoke(x, y) { particles.push({ x: x + rand(-6, 6), y: y, vx: rand(-15, 15), vy: rand(20, 60), life: 0.9, max: 0.9, r: rand(5, 9), c: "smoke" }); }
 function popup(text, x, y, c) { popups.push({ text: text, x: x, y: y, t: 0.9, c: c || "#fff" }); }
 function crash(hit) {   // hit — машина трафика, в которую врезались
+  hit.sig = 0; hit.mv = null;
   const px = CX + player.x;
   hit.crashed = true; hit.vx = (CX + hit.x < px ? -1 : 1) * rand(120, 200); hit.vr = (hit.vx > 0 ? 1 : -1) * rand(4, 7);
   boom((px + CX + hit.x) / 2, PLAYER_Y - CAR_L / 2, 34, ["#ffd54f", "#ff9800", "#fff", "#ff5722"], 260);
@@ -513,9 +570,12 @@ function update(dt) {
     const len = spawnRow();
     rowDist = 0; nextRow = Math.max(170, r * rowGapSec()) + len;     // промежуток ≥ 0,72 с на любой скорости
   }
+  laneChangeT -= dt;
+  if (laneChangeT <= 0) laneChangeT = tryLaneChange() ? lerp(3.2, 1.5, dens) * rand(0.6, 1.4) : 0.1;   // чаще при плотном потоке
   const px = CX + player.x, pl = px - CAR_W / 2 + 3, pt = PLAYER_Y - CAR_L / 2 + 4;
   for (const c of traffic) {
     c.y += (v - c.v * KMH) * dt;
+    if (!c.crashed) stepLaneChange(c, dt);
     if (c.crashed) { c.x += c.vx * dt; c.rot += c.vr * dt; c.vx *= 0.985; c.vr *= 0.985; continue; }
     if (!c.passed && c.y > PLAYER_Y + CAR_L / 2) { c.passed = true; overtakes++; bonus += 20; sound("pass"); }
     if (invuln <= 0 && overlap(pl, pt, CAR_W - 6, CAR_L - 8, CX + c.x - c.w / 2 + 2, c.y + 2, c.w - 4, c.l - 4)) {
@@ -742,6 +802,13 @@ function drawTraffic(c) {
     ctx.fillStyle = shade(c.color, 0.85); rrect(-c.w / 2 + 3, -c.l / 2 + c.l * 0.45, c.w - 6, c.l * 0.42, 2); ctx.fill();
     ctx.fillStyle = "rgba(0,0,0,0.15)"; for (let i = 1; i < 4; i++) ctx.fillRect(-c.w / 2 + 4, -c.l / 2 + c.l * (0.45 + i * 0.1), c.w - 8, 1);
   } else drawCarBody(c.w, c.l, c.color, shade(c.color, 0.65));
+  if (!c.crashed && (c.sig > 0 || c.mv) && Math.floor(animT * 5) % 2 === 0) {     // поворотник 2,5 Гц: перед и зад
+    const sx = c.sigDir * (c.w / 2 - 1.2);
+    for (const sy of [-c.l / 2 + 2.5, c.l / 2 - 2.5]) {
+      ctx.fillStyle = "rgba(255,171,0,0.35)"; circle(sx, sy, 6);
+      ctx.fillStyle = "#ffab00"; circle(sx, sy, 2.6);
+    }
+  }
   ctx.restore();
 }
 function drawPlayer() {
