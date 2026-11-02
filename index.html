@@ -90,6 +90,42 @@ function applyCar() { CAR_W = curCar().w; CAR_L = curCar().l; }
 function changeCar(d) { carIdx = (carIdx + d + CARS.length) % CARS.length; lsSet("racingCar", carIdx); applyCar(); selAnim = d; sound("pass"); }
 function lsGetEarly(key, def) { try { const v = localStorage.getItem(key); return v === null ? def : v; } catch (e) { return def; } }
 let selAnim = 0, ui = {}, swipeX = null;
+// ----- Кошелёк и тюнинг (сохраняются в localStorage) -----
+const UPG = [
+  { id: "eng",   name: "Двигатель",  desc: l => "разгон +" + 3 * l + "%" },
+  { id: "steer", name: "Управление", desc: l => "руль +" + 4 * l + "%" },
+  { id: "arm",   name: "Прочность",  desc: l => "неуязв. +" + (0.3 * l).toFixed(1).replace(".", ",") + " с · жизней " + (LIVES + (l >= 3 ? 1 : 0) + (l >= 5 ? 1 : 0)) },
+  { id: "nitro", name: "Нитро",      desc: l => "+" + (NITRO_ADD + 8 * l) + " км/ч · " + (NITRO_TIME * (1 + 0.12 * l)).toFixed(1).replace(".", ",") + " с" },
+  { id: "mag",   name: "Магнит",     desc: l => l ? "сбор монет +" + 7 * l + " пикс" : "без магнита" },
+];
+const UPG_COST = [50, 120, 250, 450, 750], UPG_MAX = 5;
+let wallet = Math.max(0, parseInt(lsGetEarly("racingWallet", "0"), 10) || 0);
+let upg = {}; try { upg = JSON.parse(lsGetEarly("racingUpg", "{}")) || {}; } catch (e) { upg = {}; }
+function lvl(id, m) { const u = upg[(m || curCar()).id]; return u && u[id] ? clamp(u[id] | 0, 0, UPG_MAX) : 0; }
+function saveWallet() { lsSet("racingWallet", wallet); }
+function buyUpg(id) {
+  const l = lvl(id); if (l >= UPG_MAX) return "max";
+  const cost = UPG_COST[l]; if (wallet < cost) return "nomoney";
+  wallet -= cost; const c = curCar().id; upg[c] = upg[c] || {}; upg[c][id] = l + 1;
+  saveWallet(); lsSet("racingUpg", JSON.stringify(upg)); return "ok";
+}
+function accMul() { return curCar().acc * (1 + 0.03 * lvl("eng")); }
+function steerMul() { return curCar().steer * (1 + 0.04 * lvl("steer")); }
+function invTime() { return curCar().inv + 0.3 * lvl("arm"); }
+function maxLives() { const a = lvl("arm"); return LIVES + (a >= 3 ? 1 : 0) + (a >= 5 ? 1 : 0); }
+function nitroAdd() { return NITRO_ADD + 8 * lvl("nitro"); }
+function nitroTime() { return NITRO_TIME * (1 + 0.12 * lvl("nitro")); }
+function magR() { return 7 * lvl("mag"); }
+function coinMult() { return speed >= 350 ? 3 : speed >= 230 ? 2 : 1; }   // на скорости монеты ценнее
+let runCoins = 0, shopFrom = "start", shopFx = null;
+function openShop(from) { shopFrom = from; state = "shop"; shopFx = null; updateButtons(); }
+function closeShop() { state = shopFrom; if (state === "over") overLock = 0; updateButtons(); }
+function doBuy(i) {
+  const u = UPG[i], l0 = lvl(u.id), r = buyUpg(u.id);
+  shopFx = { i: i, t: 0.9, ok: r === "ok",
+             msg: r === "ok" ? "Уровень " + (l0 + 1) + "!" : r === "max" ? "Уже максимум" : "Не хватает " + (UPG_COST[l0] - wallet) + " монет" };
+  sound(r === "ok" ? "pickup" : "deny"); return r;
+}
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 function lerp(a, b, f) { return a + (b - a) * f; }
 const STEP = 1 / 120, MAX_FRAME = 0.1, OVER_LOCK = 0.8;
@@ -298,7 +334,7 @@ function stepLaneChange(c, dt) {
 // ----- Начало игры -----
 function startGame() {
   traffic = []; pickups = []; particles = []; popups = [];
-  dist = 0; overtakes = 0; coinsTaken = 0; bonus = 0; lives = LIVES; newBest = false;
+  applyCar(); dist = 0; overtakes = 0; coinsTaken = 0; runCoins = 0; bonus = 0; lives = maxLives(); newBest = false;
   speed = baseSpeed = V_START; speedMark = V_START; nitroT = 0; nitro = 40; invuln = 0; shake = 0; crashSlow = 0;
   rowDist = 0; nextRow = 200; rowCount = 0; lastFree = [0, 1, 2, 3];
   laneChangeT = rand(3, 5); laneChanges = 0;
@@ -345,6 +381,7 @@ function sound(name) {
     else if (name === "nitro") { tone(200, 900, 0.5, "sawtooth", 0.05); }
     else if (name === "pickup") { tone(520, 1040, 0.25, "triangle", 0.07); }
     else if (name === "crash") { tone(180, 40, 0.5, "sawtooth", 0.09); tone(90, 30, 0.4, "square", 0.06, 0.03); }
+    else if (name === "deny") { tone(220, 140, 0.2, "square", 0.045); }
     else if (name === "start") { tone(440, 440, 0.12, "square", 0.04); tone(880, 880, 0.18, "square", 0.04, 0.15); }
   } catch (e) {}
 }
@@ -370,7 +407,7 @@ function togglePause() { if (state === "playing") pause(); else if (state === "p
 function toggleMute() { muted = !muted; lsSet("racingMuted", muted ? "1" : "0"); updateButtons(); }
 function fireNitro() {
   if (state !== "playing" || nitroT > 0 || nitro < 30) return false;
-  nitroT = NITRO_TIME * Math.min(1, nitro / 100); nitro = 0; sound("nitro"); return true;
+  nitroT = nitroTime() * Math.min(1, nitro / 100); nitro = 0; sound("nitro"); return true;
 }
 function bindButton(el, fn) {
   const h = e => { e.preventDefault(); e.stopPropagation(); unlockAudio(); fn(); };
@@ -393,16 +430,26 @@ function action(x, y) {
   unlockAudio();
   if (state === "start") {
     if (x === undefined) { startGame(); return true; }        // клавиатура
+    if (hit(ui.tune, x, y)) { openShop("start"); return true; }
     if (hit(ui.left, x, y)) changeCar(-1);
     else if (hit(ui.right, x, y)) changeCar(1);
     else if (hit(ui.go, x, y)) startGame();
     else swipeX = x;                                         // свайп по карточке — листать машины
     return true;
   }
+  if (state === "shop") {
+    if (x === undefined) return true;
+    if (hit(ui.back, x, y)) closeShop();
+    else if (hit(ui.sl, x, y)) changeCar(-1);
+    else if (hit(ui.sr, x, y)) changeCar(1);
+    else if (ui.buy) for (let i = 0; i < ui.buy.length; i++) if (hit(ui.buy[i], x, y)) { doBuy(i); break; }
+    return true;
+  }
   if (state === "paused") { resume(); return true; }
   if (state === "over") {
     if (overLock > 0) return true;
     if (x !== undefined && hit(ui.change, x, y)) { state = "start"; traffic = []; pickups = []; updateButtons(); }
+    else if (x !== undefined && hit(ui.tuneO, x, y)) openShop("over");
     else startGame();
     return true;
   }
@@ -451,6 +498,14 @@ document.addEventListener("contextmenu", stop);
 
 window.addEventListener("keydown", e => {
   const c = e.code;
+  if (state === "shop") {
+    e.preventDefault();
+    if (c === "Escape" || c === "Backspace" || c === "KeyT") closeShop();
+    else if (/^Digit[1-5]$/.test(c)) doBuy(+c.slice(5) - 1);
+    else if (c === "ArrowLeft" || c === "ArrowRight") changeCar(c === "ArrowLeft" ? -1 : 1);
+    return;
+  }
+  if (c === "KeyT" && (state === "start" || (state === "over" && overLock <= 0))) { e.preventDefault(); openShop(state); return; }
   if (state === "start" && (c === "ArrowLeft" || c === "KeyA" || c === "ArrowRight" || c === "KeyD")) {
     e.preventDefault(); if (!e.repeat) { unlockAudio(); changeCar(c === "ArrowLeft" || c === "KeyA" ? -1 : 1); } return;
   }
@@ -490,13 +545,14 @@ function crash(hit) {   // hit — машина трафика, в котору�
   shake = 0.4; flash = 0.25; lives--; sound("crash");
   speed = baseSpeed = Math.max(V_START * 0.8, baseSpeed * 0.7); nitroT = 0; crashSlow = 0.5;
   wave.phase = "calm"; wave.t = 3;
-  if (lives <= 0) gameOver(); else { invuln = curCar().inv; popup("−1 жизнь", px, PLAYER_Y - 70, "#ff8a80"); }
+  if (lives <= 0) gameOver(); else { invuln = invTime(); popup("−1 жизнь", px, PLAYER_Y - 70, "#ff8a80"); }
 }
 function gameOver() {
   state = "over"; overLock = OVER_LOCK; player.spin = rand(-1, 1) > 0 ? 7 : -7;
   steerTouch = 0; drag = null; keys.left = keys.right = false;
   const p = points();
   if (p > best) { best = p; newBest = true; lsSet("racingBest", best); }
+  wallet += runCoins; saveWallet();                                           // монеты заезда — в кошелёк
   updateButtons();
 }
 function overlap(ax, ay, aw, ah, bx, by, bw, bh) { return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by; }
@@ -521,7 +577,8 @@ function update(dt) {
   for (const p of popups) { p.t -= dt; p.y -= 40 * dt; }
   popups = popups.filter(p => p.t > 0);
 
-  if (state === "start") { scroll(dt, 90 * KMH); return; }
+  if (shopFx && shopFx.t > 0) shopFx.t -= dt;
+  if (state === "start" || state === "shop") { scroll(dt, 90 * KMH); return; }
   if (state === "over") {
     const v = Math.max(0, speed -= 260 * dt) * KMH; if (speed < 0) speed = 0;
     scroll(dt, v); player.ang += player.spin * dt; player.spin *= 0.97;
@@ -532,13 +589,13 @@ function update(dt) {
   if (state !== "playing") return;
 
   // Скорость: машина разгоняется всё время игры, нитро добавляет 90 км/ч
-  baseSpeed = Math.min(V_MAX, baseSpeed + accelAt(baseSpeed) * curCar().acc * dt);
+  baseSpeed = Math.min(V_MAX, baseSpeed + accelAt(baseSpeed) * accMul() * dt);
   updateDensity(dt);
   const mark = Math.floor(baseSpeed / SPEED_STEP) * SPEED_STEP;
   if (mark > speedMark) { speedMark = mark; popup("СКОРОСТЬ + " + mark + " км/ч", CX, PLAYER_Y - 90, "#ff9e40"); sound("pickup"); }
   if (nitroT > 0) nitroT -= dt;
   if (crashSlow > 0) crashSlow -= dt;
-  const target = baseSpeed + (nitroT > 0 ? NITRO_ADD : 0);
+  const target = baseSpeed + (nitroT > 0 ? nitroAdd() : 0);
   speed += (target - speed) * Math.min(1, dt * (nitroT > 0 ? 3 : 1.5));
   if (nitroT <= 0) nitro = Math.min(100, nitro + 2.5 * dt);          // заряд нитро медленно копится сам
   const v = speed * KMH;
@@ -546,7 +603,7 @@ function update(dt) {
   scroll(dt, v);
 
   // Руль: плавное боковое движение, без прыжков по полосам
-  const LAT = (240 + rel() * 0.35) * curCar().steer;
+  const LAT = (240 + rel() * 0.35) * steerMul();
   let dir = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
   if (drag && drag.moved) {
     const want = Math.max(ROAD_L - CX + CAR_W / 2 + 4, Math.min(ROAD_R - CX - CAR_W / 2 - 4, drag.px0 + (drag.x - drag.x0) * 1.3));
@@ -585,9 +642,13 @@ function update(dt) {
   traffic = traffic.filter(c => c.y < H + 120);
   for (const p of pickups) {
     p.y += (v - V_TRAFFIC * KMH) * dt;
-    if (!p.taken && Math.abs(CX + p.x - px) < CAR_W / 2 + 10 && Math.abs(p.y - PLAYER_Y) < CAR_L / 2 + 10) {
+    const mr = p.kind === "coin" ? magR() : 0;
+    if (mr > 0 && !p.taken && Math.abs(p.x - player.x) < CAR_W / 2 + 10 + mr * 2.2 && Math.abs(p.y - PLAYER_Y) < CAR_L / 2 + 10 + mr * 2.2)
+      p.x += (player.x - p.x) * Math.min(1, dt * 4);                         // магнит подтягивает монеты
+    if (!p.taken && Math.abs(CX + p.x - px) < CAR_W / 2 + 10 + mr && Math.abs(p.y - PLAYER_Y) < CAR_L / 2 + 10 + mr) {
       p.taken = true;
-      if (p.kind === "coin") { coinsTaken++; bonus += 50; nitro = Math.min(100, nitro + 12); sound("coin"); popup("+50", CX + p.x, p.y, "#ffe082"); }
+      if (p.kind === "coin") { const cm = coinMult(); coinsTaken++; runCoins += cm; bonus += 50; nitro = Math.min(100, nitro + 12); sound("coin");
+        popup(cm > 1 ? "+" + cm + " монеты" : "+1 монета", CX + p.x, p.y, "#ffe082"); }
       else { nitro = 100; sound("pickup"); popup("НИТРО!", CX + p.x, p.y, "#b388ff"); }
     }
   }
@@ -876,7 +937,14 @@ function drawHUD() {
   textC(fmtDist(dist), CX, top + 19, 22, "#fff", 800);
   textC("очки " + points() + " · обгонов " + overtakes, CX, top + 40, 11.5, "#e1d5ff", 600);
   textC("рекорд " + Math.max(best, 0), CX, top + 54, 10.5, "#b0a6c8", 600);
-  for (let i = 0; i < LIVES; i++) heart(CX - 20 + i * 20, top + 80, 8, i < lives);
+  const ml = maxLives(); for (let i = 0; i < ml; i++) heart(CX - (ml - 1) * 10 + i * 20, top + 80, 8, i < lives);
+  // монеты заезда
+  const cy2 = top + 118;
+  ctx.fillStyle = "rgba(24,16,40,0.55)"; rrect(CX - 52, cy2 - 9, 104, 18, 9); ctx.fill();
+  coinIcon(CX - 38, cy2, 6.5);
+  ctx.font = "800 11px -apple-system, Arial"; ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.fillStyle = "#ffe082";
+  ctx.fillText(String(runCoins), CX - 27, cy2 + 0.5);
+  const cmul = coinMult(); if (cmul > 1) { ctx.fillStyle = "#ffb74d"; ctx.textAlign = "right"; ctx.fillText("×" + cmul, CX + 44, cy2 + 0.5); }
   // индикатор плотности потока: 5 делений
   const lvl = clamp(Math.ceil(dens * 5 - 0.05), 1, 5), dy = top + 99;
   ctx.fillStyle = "rgba(24,16,40,0.55)"; rrect(CX - 52, dy - 8, 104, 16, 8); ctx.fill();
@@ -902,11 +970,60 @@ function drawHUD() {
   const nx = W - safe.r - 49, ny = H - safe.b - 51, NR = 34, ready = nitroT <= 0 && nitro >= 30;
   ctx.fillStyle = "rgba(24,16,40,0.78)"; circle(nx, ny, NR + 3);
   ctx.lineWidth = 6; ctx.strokeStyle = "rgba(255,255,255,0.15)"; ctx.beginPath(); ctx.arc(nx, ny, NR - 4, 0, Math.PI * 2); ctx.stroke();
-  const nf = nitroT > 0 ? nitroT / NITRO_TIME : nitro / 100;
+  const nf = nitroT > 0 ? nitroT / nitroTime() : nitro / 100;
   ctx.strokeStyle = nitroT > 0 ? "#e1d5ff" : (ready ? "#b388ff" : "#6a5a8a");
   ctx.beginPath(); ctx.arc(nx, ny, NR - 4, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * nf); ctx.stroke();
   textC("N₂O", nx, ny - 4, 15, ready || nitroT > 0 ? "#fff" : "#9a8fb5", 900);
   textC(nitroT > 0 ? "ВКЛ" : (isTouch ? "жми" : "↑ / пробел"), nx, ny + 12, 8.5, "#cfc6e6", 600);
+}
+function coinIcon(x, y, r) {
+  ctx.fillStyle = "#f9a825"; circle(x, y, r); ctx.fillStyle = "#ffd54f"; circle(x, y, r * 0.75);
+  ctx.fillStyle = "#f57f17"; ctx.font = "900 " + (r * 1.1) + "px -apple-system, Arial"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText("₽", x, y + 0.5);
+}
+function walletPill(x, y) {            // x — правый край
+  ctx.font = "800 13px -apple-system, Arial"; const s = String(wallet), w = ctx.measureText(s).width + 34;
+  ctx.fillStyle = "rgba(24,16,40,0.75)"; rrect(x - w, y - 13, w, 26, 13); ctx.fill();
+  ctx.strokeStyle = "rgba(255,213,79,0.6)"; ctx.lineWidth = 1.5; rrect(x - w, y - 13, w, 26, 13); ctx.stroke();
+  coinIcon(x - w + 13, y, 8); ctx.fillStyle = "#ffe082"; ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.font = "800 13px -apple-system, Arial"; ctx.fillText(s, x - w + 25, y + 0.5);
+}
+function button(r, label, sub, on, glow) {
+  ctx.fillStyle = on ? (glow ? "rgba(255,213,79,0.55)" : "rgba(179,136,255,0.35)") : "rgba(255,255,255,0.08)"; rrect(r.x, r.y, r.w, r.h, 12); ctx.fill();
+  ctx.strokeStyle = on ? "rgba(225,213,255,0.85)" : "rgba(255,255,255,0.2)"; ctx.lineWidth = 1.5; rrect(r.x, r.y, r.w, r.h, 12); ctx.stroke();
+  textC(label, r.x + r.w / 2, r.y + r.h / 2 + (sub ? -7 : 1), sub ? 14 : 15, on ? "#fff" : "#8a809f", 800);
+  if (sub) textC(sub, r.x + r.w / 2, r.y + r.h / 2 + 10, 10, on ? "#e1d5ff" : "#6f6688", 600);
+}
+function drawShop() {
+  ctx.fillStyle = "rgba(15,10,28,0.8)"; ctx.fillRect(0, 0, W, H);
+  const avail = H - safe.t - safe.b, top = safe.t + Math.max(6, (avail - 640) / 2);
+  const pw = Math.min(344, W - 14), x0 = CX - pw / 2, m = curCar();
+  textC("ТЮНИНГ", CX, top + 24, 26, "#fff", 900, "#3d1f66");
+  ui.sl = { x: x0, y: top + 44, w: 52, h: 46 }; ui.sr = { x: x0 + pw - 52, y: top + 44, w: 52, h: 46 };
+  for (const [r, d] of [[ui.sl, -1], [ui.sr, 1]]) { const ax = r.x + r.w / 2, ay = r.y + r.h / 2;
+    ctx.fillStyle = "rgba(179,136,255,0.25)"; circle(ax, ay, 18); ctx.fillStyle = "#fff"; poly([ax + 5 * d, ay, ax - 4 * d, ay - 7, ax - 4 * d, ay + 7]); }
+  textC(m.name, CX, top + 60, 15, "#fff", 900);
+  textC(m.colorName + " · " + m.sub, CX, top + 78, 11, "#cfc6e6", 600);
+  walletPill(CX + 52, top + 106);
+  ui.buy = [];
+  const ry0 = top + 128, rh = 84;
+  for (let i = 0; i < UPG.length; i++) {
+    const u = UPG[i], l = lvl(u.id), y = ry0 + i * rh, fx = shopFx && shopFx.i === i && shopFx.t > 0 ? shopFx : null;
+    const sh = fx && !fx.ok ? Math.sin(fx.t * 40) * 4 * fx.t : 0;
+    ctx.save(); ctx.translate(sh, 0);
+    ctx.fillStyle = fx && fx.ok ? "rgba(255,213,79," + (0.12 + 0.25 * fx.t) + ")" : "rgba(40,28,64,0.85)"; rrect(x0, y, pw, rh - 8, 14); ctx.fill();
+    ctx.strokeStyle = "rgba(179,136,255,0.45)"; ctx.lineWidth = 1.5; rrect(x0, y, pw, rh - 8, 14); ctx.stroke();
+    ctx.font = "800 15px -apple-system, Arial"; ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.fillStyle = "#fff"; ctx.fillText(u.name, x0 + 14, y + 16);
+    for (let s = 0; s < UPG_MAX; s++) { ctx.fillStyle = s < l ? "#b388ff" : "rgba(255,255,255,0.16)"; rrect(x0 + 14 + s * 21, y + 30, 18, 7, 3); ctx.fill(); }
+    ctx.font = "600 10.5px -apple-system, Arial"; ctx.fillStyle = "#e1d5ff"; ctx.fillText("сейчас: " + u.desc(l), x0 + 14, y + 49);
+    ctx.fillStyle = "#9a8fb5"; ctx.fillText(l < UPG_MAX ? "далее: " + u.desc(l + 1) : "максимальный уровень", x0 + 14, y + 63);
+    const b = { x: x0 + pw - 104, y: y + 12, w: 94, h: 52 }; ui.buy.push({ x: b.x + sh, y: b.y, w: b.w, h: b.h });
+    if (l >= UPG_MAX) button(b, "МАКС", "уровень 5", false);
+    else { const cost = UPG_COST[l], can = wallet >= cost; button(b, "  " + cost, can ? "купить" : "мало монет", can, can);
+      ctx.font = "800 14px -apple-system, Arial"; const tw = ctx.measureText("  " + cost).width; coinIcon(b.x + b.w / 2 - tw / 2 - 2, b.y + b.h / 2 - 7, 7); }
+    if (fx) { ctx.globalAlpha = Math.min(1, fx.t * 2); textC(fx.msg, x0 + pw / 2 - 30, y + 16, 13, fx.ok ? "#ffe082" : "#ff8a80", 900, "rgba(0,0,0,0.6)"); ctx.globalAlpha = 1; }
+    ctx.restore();
+  }
+  ui.back = { x: CX - 110, y: ry0 + UPG.length * rh + 4, w: 220, h: 48 };
+  button(ui.back, shopFrom === "over" ? "← Назад" : "← В гараж", null, true);
 }
 function drawLogo(cx, cy, h) {
   if (!logoOk) return;
@@ -923,7 +1040,8 @@ function drawStart() {
   const avail = H - safe.t - safe.b, top = safe.t + Math.max(4, (avail - 600) / 2);
   drawLogo(CX, top + 34, 46);
   textC("AIVIRO RACING", CX, top + 80, 30, "#fff", 900, "#3d1f66");
-  const m = curCar(), py = top + 104, ph = 292, pw = Math.min(320, W - 24);
+  const m = curCar(), py = top + 104, ph = 306, pw = Math.min(320, W - 24);
+  walletPill(W - safe.r - 10, top + 34);
   panel(CX - pw / 2, py, pw, ph);
   textC("ВЫБЕРИ МАШИНУ · " + (carIdx + 1) + " / " + CARS.length, CX, py + 18, 12, "#c9a6ff", 800);
   // машина крупно, со сдвигом-анимацией при смене
@@ -947,10 +1065,11 @@ function drawStart() {
   const sx = CX - 122;
   statBar("Разгон", (m.acc - 0.93) / 0.15, sx, py + 242);
   statBar("Руль", (m.steer - 0.92) / 0.15, sx + 128, py + 242);
-  textC(m.trait, CX, py + 262, 11, "#ffe082", 700);
-  for (let i = 0; i < CARS.length; i++) { ctx.fillStyle = i === carIdx ? "#fff" : "rgba(255,255,255,0.3)"; circle(CX - (CARS.length - 1) * 6 + i * 12, py + 280, i === carIdx ? 3.5 : 2.5); }
+  textC(m.trait, CX, py + 260, 11, "#ffe082", 700);
+  textC("Тюнинг: " + UPG.map(u => u.name.slice(0, 4) + " " + lvl(u.id)).join(" · "), CX, py + 277, 10, "#b9e3c6", 700);
+  for (let i = 0; i < CARS.length; i++) { ctx.fillStyle = i === carIdx ? "#fff" : "rgba(255,255,255,0.3)"; circle(CX - (CARS.length - 1) * 6 + i * 12, py + 294, i === carIdx ? 3.5 : 2.5); }
   // кнопка «Поехали»
-  const by = py + ph + 14, bw = 220, bh = 54;
+  const by = py + ph + 10, bw = 220, bh = 52;
   ui.go = { x: CX - bw / 2, y: by, w: bw, h: bh };
   const pulse = 1 + 0.03 * Math.sin(animT * 4);
   ctx.save(); ctx.translate(CX, by + bh / 2); ctx.scale(pulse, pulse);
@@ -958,7 +1077,9 @@ function drawStart() {
   ctx.fillStyle = bg; rrect(-bw / 2, -bh / 2, bw, bh, 16); ctx.fill();
   ctx.strokeStyle = "rgba(255,255,255,0.6)"; ctx.lineWidth = 2; rrect(-bw / 2, -bh / 2, bw, bh, 16); ctx.stroke();
   textC("ПОЕХАЛИ!", 0, 1, 22, "#fff", 900); ctx.restore();
-  const hy = by + bh + 22;
+  ui.tune = { x: CX - bw / 2, y: by + bh + 8, w: bw, h: 42 };
+  button(ui.tune, isTouch ? "ТЮНИНГ" : "ТЮНИНГ (T)", null, true);
+  const hy = by + bh + 8 + 42 + 18;
   if (isTouch) {
     textC("Листай стрелками или свайпом · руль — палец слева/справа", CX, hy, 11, "#e1d5ff", 600);
     textC("Нитро — кнопка N₂O · поток со временем плотнее", CX, hy + 17, 11, "#cfc6e6", 600);
@@ -966,27 +1087,29 @@ function drawStart() {
     textC("← → — выбор машины · ПРОБЕЛ — старт", CX, hy, 11.5, "#e1d5ff", 600);
     textC("Руль: ← → / A D · Нитро: ↑ / пробел · P — пауза", CX, hy + 17, 11, "#cfc6e6", 600);
   }
-  textC("Рекорд: " + best, CX, hy + 40, 15, "#ffe082", 800);
+  textC("Рекорд: " + best, CX, hy + 37, 14, "#ffe082", 800);
   textC("Карайкоз Н. В.", CX, H - safe.b - 12, 10, "rgba(255,255,255,0.6)", 600);
 }
 function drawOver() {
   ctx.fillStyle = "rgba(15,10,28,0.5)"; ctx.fillRect(0, 0, W, H);
-  const ph = 300, py = Math.max(safe.t + 110, H * 0.5 - ph / 2 - 20);
+  const ph = 328, py = Math.max(safe.t + 100, H * 0.5 - ph / 2 - 20);
   panel(CX - 145, py, 290, ph);
   textC("АВАРИЯ!", CX, py + 34, 30, "#ff5252", 900, "#2a0d0d");
   textC("Игра окончена", CX, py + 64, 14, "#cfc6e6", 600);
   textC("Путь: " + fmtDist(dist), CX, py + 96, 17, "#fff", 700);
   textC("Обгонов: " + overtakes + " · Монет: " + coinsTaken, CX, py + 120, 14, "#e1d5ff", 600);
   textC("Очки: " + points(), CX, py + 150, 22, "#fff", 900);
-  textC(newBest ? "НОВЫЙ РЕКОРД!" : "Рекорд: " + best, CX, py + 180, 16, "#ffe082", 800);
+  textC(newBest ? "НОВЫЙ РЕКОРД!" : "Рекорд: " + best, CX, py + 178, 16, "#ffe082", 800);
+  coinIcon(CX - 92, py + 206, 8);
+  textC("+" + runCoins + " монет · всего " + wallet, CX + 8, py + 206, 15, "#ffe082", 800);
   if (overLock <= 0) {
     ctx.globalAlpha = 0.6 + 0.4 * Math.sin(animT * 4);
-    textC(isTouch ? "Коснись, чтобы ехать снова" : "ПРОБЕЛ — ещё раз", CX, py + 222, 16, "#fff", 800); ctx.globalAlpha = 1;
+    textC(isTouch ? "Коснись, чтобы ехать снова" : "ПРОБЕЛ — ещё раз", CX, py + 240, 16, "#fff", 800); ctx.globalAlpha = 1;
   }
-  ui.change = { x: CX - 100, y: py + 246, w: 200, h: 40 };
-  ctx.fillStyle = "rgba(179,136,255,0.25)"; rrect(ui.change.x, ui.change.y, 200, 40, 12); ctx.fill();
-  ctx.strokeStyle = "rgba(225,213,255,0.8)"; ctx.lineWidth = 1.5; rrect(ui.change.x, ui.change.y, 200, 40, 12); ctx.stroke();
-  textC(isTouch ? "Сменить машину" : "Сменить машину (C)", CX, py + 266, 15, "#fff", 800);
+  ui.change = { x: CX - 135, y: py + 266, w: 130, h: 46 };
+  ui.tuneO = { x: CX + 5, y: py + 266, w: 130, h: 46 };
+  button(ui.change, "Гараж", isTouch ? "сменить авто" : "клавиша C", true);
+  button(ui.tuneO, "Тюнинг", isTouch ? "улучшения" : "клавиша T", true);
 }
 function drawPaused() {
   ctx.fillStyle = "rgba(15,10,28,0.55)"; ctx.fillRect(0, 0, W, H);
@@ -1001,7 +1124,7 @@ function draw() {
   for (const s of scenery) drawSceneryBase(s);
   for (const p of pickups) drawPickup(p);
   for (const c of traffic) drawTraffic(c);
-  if (state !== "start") drawPlayer();
+  if (state !== "start" && state !== "shop") drawPlayer();
   drawParticles();
   for (const s of scenery) drawSceneryTop(s);
   if (nitroT > 0 && state === "playing") {                // линии скорости
@@ -1015,6 +1138,7 @@ function draw() {
   if (state === "start") drawStart();
   else if (state === "over") drawOver();
   else if (state === "paused") drawPaused();
+  else if (state === "shop") drawShop();
 }
 
 // ----- Игровой цикл: requestAnimationFrame + фиксированный шаг физики -----
