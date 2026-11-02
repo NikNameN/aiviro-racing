@@ -61,7 +61,34 @@ const SPEED_STEP = 50;                                   // каждые 50 км
 const V_TRAFFIC = 60;                                    // скорость попутного потока, км/ч
 const NITRO_ADD = 90, NITRO_TIME = 3;                    // нитро: +90 км/ч на 3 с
 const LIVES = 3, INVULN = 2.0;
-const CAR_W = 28, CAR_L = 52;
+let CAR_W = 28, CAR_L = 52;                              // размеры выбранной машины игрока
+// ----- Гараж: 5 машин на выбор (рисуются процедурно, вид сверху) -----
+// acc — множитель разгона, steer — множитель руля, inv — неуязвимость после аварии, с
+const CARS = [
+  { id: "octavia", name: "Шкода Октавия A7", sub: "рестайлинг · лифтбек", colorName: "серебристая", lat: "Škoda Octavia A7 FL",
+    color: "#c9ced5", dark: "#7a828c", roof: "#a9b0b9", w: 28, l: 54, rad: 8, kind: "liftback",
+    acc: 1.03, steer: 1.00, inv: 2.0, trait: "Сбалансированная" },
+  { id: "largus", name: "Лада Ларгус", sub: "универсал", colorName: "белая", lat: "Lada Largus",
+    color: "#f4f5f6", dark: "#aab0b8", roof: "#dde1e5", w: 29, l: 55, rad: 5, kind: "wagon",
+    acc: 0.95, steer: 0.98, inv: 2.6, trait: "Неубиваемая: дольше неуязвимость" },
+  { id: "gs3", name: "GAC GS3", sub: "кроссовер", colorName: "голубая", lat: "GAC GS3",
+    color: "#6cc4ef", dark: "#2c82b4", roof: "#1c1f25", w: 29, l: 51, rad: 8, kind: "gs3",
+    acc: 1.00, steer: 1.07, inv: 2.0, trait: "Компактная: самый лёгкий руль" },
+  { id: "focus", name: "Форд Фокус 2", sub: "рестайлинг · хэтчбек", colorName: "тёмно-синяя", lat: "Ford Focus II FL",
+    color: "#24447f", dark: "#0f1f42", roof: "#18315e", w: 28, l: 50, rad: 9, kind: "focus",
+    acc: 1.05, steer: 1.04, inv: 2.0, trait: "Резвая и вёрткая" },
+  { id: "xc60", name: "Вольво XC60", sub: "кроссовер", colorName: "белая", lat: "Volvo XC60",
+    color: "#f2f3f5", dark: "#a6acb4", roof: "#e3e6ea", w: 31, l: 56, rad: 7, kind: "xc60",
+    acc: 1.08, steer: 0.94, inv: 2.0, trait: "Самый мощный, но крупный" },
+];
+let carIdx = Math.max(0, Math.min(CARS.length - 1, parseInt(lsGetEarly("racingCar", "0"), 10) || 0));
+function car() { return CARS[carIdx]; }
+function applyCar() { CAR_W = car().w; CAR_L = car().l; }
+function changeCar(d) { carIdx = (carIdx + d + CARS.length) % CARS.length; lsSet("racingCar", carIdx); applyCar(); selAnim = d; sound("pass"); }
+function lsGetEarly(key, def) { try { const v = localStorage.getItem(key); return v === null ? def : v; } catch (e) { return def; } }
+let selAnim = 0, ui = {}, swipeX = null;
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+function lerp(a, b, f) { return a + (b - a) * f; }
 const STEP = 1 / 120, MAX_FRAME = 0.1, OVER_LOCK = 0.8;
 
 let W = 360, H = 640, CX = 180, ROAD_L = 62, ROAD_R = 298, PLAYER_Y = 480;
@@ -85,7 +112,7 @@ function lsGet(key, def) { try { const v = localStorage.getItem(key); return v =
 function lsSet(key, v) { try { localStorage.setItem(key, String(v)); } catch (e) {} }
 
 // ----- Состояние -----
-let state = "start";                 // start | playing | paused | over
+let state = "start";                 // start (выбор машины) | playing | paused | over
 let best = parseInt(lsGet("racingBest", "0"), 10) || 0;
 let newBest = false;
 let dist = 0, overtakes = 0, coinsTaken = 0, bonus = 0, lives = LIVES;
@@ -94,6 +121,7 @@ let invuln = 0, shake = 0, flash = 0, overLock = 0, animT = 0, crashSlow = 0;
 let roadOff = 0, rowDist = 0, nextRow = 260, rowCount = 0, lastFree = [0, 1, 2, 3];
 const player = { x: 0, vx: 0, ang: 0, spin: 0 };        // x — смещение от центра дороги
 let traffic = [], pickups = [], particles = [], scenery = [], popups = [];
+let playTime = 0, dens = 0, densTarget = 0, wave = { phase: "flow", t: 16 };   // плотность потока 0..1
 function rand(a, b) { return a + Math.random() * (b - a); }
 function pick(a) { return a[Math.floor(Math.random() * a.length)]; }
 function laneX(i) { return (i - (LANES - 1) / 2) * LANE_W; }
@@ -154,13 +182,39 @@ function newCar(lane, y) {
   else { type = "truck"; w = 32; l = 92; }
   return { lane: lane, x: laneX(lane) + rand(-4, 4), y: y - l, w: w, l: l, type: type, color: pick(COLORS),
            cab: pick(["#c62828", "#1565c0", "#f9a825", "#2e7d32", "#ef6c00", "#5e35b1"]),
-           v: V_TRAFFIC + (type === "truck" ? -5 : 0), passed: false, crashed: false, vx: 0, rot: 0, vr: 0 };
+           v: V_TRAFFIC, passed: false, crashed: false, vx: 0, rot: 0, vr: 0 };
 }
+// ----- Плотность потока -----
+// Базовый уровень растёт плавно со временем заезда: 1 − e^(−t/100)
+//   (≈0,26 на 30 с, 0,45 на 1 мин, 0,70 на 2 мин, 0,83 на 3 мин, 0,95 на 5 мин).
+// Поверх — волны: «поток» 16–26 с → «плотный поток» 6–9 с (+0,22) → «передышка» 3,5–5 с (×0,35).
+// После аварии сразу передышка. Уровень сглажен (τ = 1,5 с), поэтому меняется без рывков.
+function densRamp(tm) { return 1 - Math.exp(-tm / 100); }
+function waveNext() {
+  if (wave.phase === "flow") { wave.phase = "rush"; wave.t = rand(6, 9); popup("ПЛОТНЫЙ ПОТОК!", CX, PLAYER_Y - 130, "#ffb74d"); }
+  else if (wave.phase === "rush") { wave.phase = "calm"; wave.t = rand(3.5, 5); popup("ПЕРЕДЫШКА", CX, PLAYER_Y - 130, "#a5d6a7"); }
+  else { wave.phase = "flow"; wave.t = rand(16, 26); }
+}
+function updateDensity(dt) {
+  playTime += dt;
+  wave.t -= dt; if (wave.t <= 0) waveNext();
+  const base = densRamp(playTime);
+  let tgt = base * (1 + 0.06 * Math.sin(playTime * 0.8));            // лёгкое «дыхание» потока
+  if (wave.phase === "rush") tgt = base + 0.22 * Math.min(1, 0.35 + base);
+  else if (wave.phase === "calm") tgt = base * 0.35;
+  densTarget = clamp(tgt, 0, 1);
+  dens += (densTarget - dens) * Math.min(1, dt / 1.5);
+}
+// Промежуток между рядами — во времени, поэтому в пикселях он растёт со скоростью:
+// 1,8 с (редко) → 0,72 с (плотно), на скорости > 250 км/ч до +0,12 с запаса на реакцию.
+function rowGapSec() { const hs = clamp((speed - 250) / 250, 0, 1); return lerp(1.8, 0.72, dens) + 0.12 * hs; }
 function spawnRow() {
   rowCount++;
-  const d = Math.min(1, dist / 3500);                      // сложность растёт с пройденным путём
-  const hs = Math.max(0, Math.min(1, (speed - 300) / 150));   // на очень высокой скорости реже 3 машины в ряд
-  let nb = Math.random() < 0.55 - 0.35 * d ? 1 : (Math.random() < (0.25 + 0.5 * d) * (1 - 0.5 * hs) ? 3 : 2);
+  const d = dens;
+  const hs = clamp((speed - 300) / 200, 0, 1);              // на очень высокой скорости реже 3 машины в ряд
+  const p1 = lerp(0.78, 0.12, d), p3 = lerp(0, 0.5, d) * (1 - 0.4 * hs);
+  const rr = Math.random();
+  let nb = rr < p1 ? 1 : (rr < 1 - p3 ? 2 : 3);               // максимум 3 из 4 полос — одна всегда свободна
   if (rowCount <= 2) nb = 1;
   let blocked, free, tries = 0;
   do {                                                     // свободная полоса не дальше 2 полос от прошлой
@@ -188,6 +242,8 @@ function startGame() {
   dist = 0; overtakes = 0; coinsTaken = 0; bonus = 0; lives = LIVES; newBest = false;
   speed = baseSpeed = V_START; speedMark = V_START; nitroT = 0; nitro = 40; invuln = 0; shake = 0; crashSlow = 0;
   rowDist = 0; nextRow = 200; rowCount = 0; lastFree = [0, 1, 2, 3];
+  playTime = 0; dens = 0; densTarget = 0; wave = { phase: "flow", t: rand(14, 20) };
+  applyCar();
   player.x = laneX(1) + LANE_W / 2; player.vx = 0; player.ang = 0; player.spin = 0;
   steerTouch = 0; drag = null; keys.left = keys.right = false;
   state = "playing"; sound("start"); updateButtons();
@@ -271,17 +327,31 @@ bindButton(nitroBtn, fireNitro);
 const keys = { left: false, right: false };
 let steerTouch = 0, drag = null, activePointer = null;
 function screenX(e) { const r = canvas.getBoundingClientRect(); return (e.clientX - r.left) / k; }
-function action() {
+function hit(r, x, y) { return r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h; }
+function screenY(e) { const r = canvas.getBoundingClientRect(); return (e.clientY - r.top) / k; }
+function action(x, y) {
   unlockAudio();
-  if (state === "start") { startGame(); return true; }
+  if (state === "start") {
+    if (x === undefined) { startGame(); return true; }        // клавиатура
+    if (hit(ui.left, x, y)) changeCar(-1);
+    else if (hit(ui.right, x, y)) changeCar(1);
+    else if (hit(ui.go, x, y)) startGame();
+    else swipeX = x;                                         // свайп по карточке — листать машины
+    return true;
+  }
   if (state === "paused") { resume(); return true; }
-  if (state === "over") { if (overLock <= 0) startGame(); return true; }
+  if (state === "over") {
+    if (overLock > 0) return true;
+    if (x !== undefined && hit(ui.change, x, y)) { state = "start"; traffic = []; pickups = []; updateButtons(); }
+    else startGame();
+    return true;
+  }
   return false;
 }
 function onDown(e) {
   if (e.cancelable) e.preventDefault();
   if (e.pointerType === "mouse" && e.button !== 0) return;
-  if (action()) return;                       // это касание запустило/продолжило игру — не рулим им
+  if (action(screenX(e), e.clientY !== undefined ? screenY(e) : 0)) return;   // касание меню — не рулим им
   const x = screenX(e);
   activePointer = e.pointerId;
   steerTouch = x < W / 2 ? -1 : 1;
@@ -295,6 +365,10 @@ function onMove(e) {
   if (!drag.moved && Math.abs(x - drag.x0) > 12) { drag.moved = true; drag.x0 = x; drag.px0 = player.x; }
 }
 function onUp(e) {
+  if (swipeX !== null && state === "start" && e.clientX !== undefined) {
+    const dx = screenX(e) - swipeX; if (Math.abs(dx) > 40) changeCar(dx < 0 ? 1 : -1);
+  }
+  swipeX = null;
   if (e.pointerId !== activePointer) return;
   activePointer = null; steerTouch = 0; drag = null;
 }
@@ -304,11 +378,11 @@ if (window.PointerEvent) {
   canvas.addEventListener("pointerup", onUp); canvas.addEventListener("pointercancel", onUp);
   canvas.addEventListener("lostpointercapture", onUp);
 } else {
-  canvas.addEventListener("touchstart", e => { const t = e.changedTouches[0]; onDown({ clientX: t.clientX, pointerId: 1, pointerType: "touch", cancelable: e.cancelable, preventDefault: () => e.preventDefault() }); }, { passive: false });
+  canvas.addEventListener("touchstart", e => { const t = e.changedTouches[0]; onDown({ clientX: t.clientX, clientY: t.clientY, pointerId: 1, pointerType: "touch", cancelable: e.cancelable, preventDefault: () => e.preventDefault() }); }, { passive: false });
   canvas.addEventListener("touchmove", e => { const t = e.changedTouches[0]; onMove({ clientX: t.clientX, pointerId: 1, cancelable: e.cancelable, preventDefault: () => e.preventDefault() }); }, { passive: false });
-  canvas.addEventListener("touchend", () => onUp({ pointerId: 1 }));
-  canvas.addEventListener("mousedown", e => onDown({ clientX: e.clientX, pointerId: 0, pointerType: "mouse", button: e.button, cancelable: true, preventDefault: () => e.preventDefault() }));
-  window.addEventListener("mouseup", () => onUp({ pointerId: 0 }));
+  canvas.addEventListener("touchend", e => { const t = e.changedTouches[0]; onUp({ pointerId: 1, clientX: t ? t.clientX : undefined }); });
+  canvas.addEventListener("mousedown", e => onDown({ clientX: e.clientX, clientY: e.clientY, pointerId: 0, pointerType: "mouse", button: e.button, cancelable: true, preventDefault: () => e.preventDefault() }));
+  window.addEventListener("mouseup", e => onUp({ pointerId: 0, clientX: e.clientX }));
 }
 const stop = e => { if (e.cancelable) e.preventDefault(); };
 for (const t of ["touchstart", "touchmove", "touchend", "gesturestart", "gesturechange", "dblclick"])
@@ -317,6 +391,10 @@ document.addEventListener("contextmenu", stop);
 
 window.addEventListener("keydown", e => {
   const c = e.code;
+  if (state === "start" && (c === "ArrowLeft" || c === "KeyA" || c === "ArrowRight" || c === "KeyD")) {
+    e.preventDefault(); if (!e.repeat) { unlockAudio(); changeCar(c === "ArrowLeft" || c === "KeyA" ? -1 : 1); } return;
+  }
+  if (state === "over" && c === "KeyC" && overLock <= 0) { state = "start"; traffic = []; pickups = []; updateButtons(); return; }
   if (c === "ArrowLeft" || c === "KeyA") { e.preventDefault(); keys.left = true; }
   else if (c === "ArrowRight" || c === "KeyD") { e.preventDefault(); keys.right = true; }
   else if (c === "Space" || c === "ArrowUp" || c === "KeyW" || c === "Enter") {
@@ -350,7 +428,8 @@ function crash(car) {
   boom((px + CX + car.x) / 2, PLAYER_Y - CAR_L / 2, 34, ["#ffd54f", "#ff9800", "#fff", "#ff5722"], 260);
   shake = 0.4; flash = 0.25; lives--; sound("crash");
   speed = baseSpeed = Math.max(V_START * 0.8, baseSpeed * 0.7); nitroT = 0; crashSlow = 0.5;
-  if (lives <= 0) gameOver(); else { invuln = INVULN; popup("−1 жизнь", px, PLAYER_Y - 70, "#ff8a80"); }
+  wave.phase = "calm"; wave.t = 3;
+  if (lives <= 0) gameOver(); else { invuln = car().inv; popup("−1 жизнь", px, PLAYER_Y - 70, "#ff8a80"); }
 }
 function gameOver() {
   state = "over"; overLock = OVER_LOCK; player.spin = rand(-1, 1) > 0 ? 7 : -7;
@@ -392,7 +471,8 @@ function update(dt) {
   if (state !== "playing") return;
 
   // Скорость: машина разгоняется всё время игры, нитро добавляет 90 км/ч
-  baseSpeed = Math.min(V_MAX, baseSpeed + accelAt(baseSpeed) * dt);
+  baseSpeed = Math.min(V_MAX, baseSpeed + accelAt(baseSpeed) * car().acc * dt);
+  updateDensity(dt);
   const mark = Math.floor(baseSpeed / SPEED_STEP) * SPEED_STEP;
   if (mark > speedMark) { speedMark = mark; popup("СКОРОСТЬ + " + mark + " км/ч", CX, PLAYER_Y - 90, "#ff9e40"); sound("pickup"); }
   if (nitroT > 0) nitroT -= dt;
@@ -405,7 +485,7 @@ function update(dt) {
   scroll(dt, v);
 
   // Руль: плавное боковое движение, без прыжков по полосам
-  const LAT = 240 + rel() * 0.35;
+  const LAT = (240 + rel() * 0.35) * car().steer;
   let dir = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
   if (drag && drag.moved) {
     const want = Math.max(ROAD_L - CX + CAR_W / 2 + 4, Math.min(ROAD_R - CX - CAR_W / 2 - 4, drag.px0 + (drag.x - drag.x0) * 1.3));
@@ -427,7 +507,7 @@ function update(dt) {
   rowDist += r * dt;
   if (rowDist >= nextRow) {
     const len = spawnRow();
-    rowDist = 0; nextRow = Math.max(200, Math.min(330, r * 0.85), r * 0.8) + len;   // промежуток ≥ 0,8 с на любой скорости
+    rowDist = 0; nextRow = Math.max(170, r * rowGapSec()) + len;     // промежуток ≥ 0,72 с на любой скорости
   }
   const px = CX + player.x, pl = px - CAR_W / 2 + 3, pt = PLAYER_Y - CAR_L / 2 + 4;
   for (const c of traffic) {
@@ -550,6 +630,85 @@ function shade(hex, f) {
   const m = v => Math.max(0, Math.min(255, Math.round(v * f)));
   return "rgb(" + m(r) + "," + m(g) + "," + m(b) + ")";
 }
+// Машины гаража (вид сверху, нос вверх, (0,0) — центр). Пропорции и светотехника по модели.
+const SHAPES = {   // ws — лобовое [начало, длина], roof — крыша [от, до], rg — заднее стекло [от, до] (доли длины)
+  liftback: { ws: [0.27, 0.17], roof: [0.45, 0.65], rg: [0.65, 0.85] },   // Октавия: длинное покатое стекло лифтбека
+  wagon:    { ws: [0.25, 0.15], roof: [0.41, 0.90], rg: [0.90, 0.965] },  // Ларгус: длинная крыша до самой кормы
+  gs3:      { ws: [0.26, 0.15], roof: [0.42, 0.80], rg: [0.80, 0.89] },   // GS3: чёрная «парящая» крыша
+  focus:    { ws: [0.25, 0.18], roof: [0.44, 0.74], rg: [0.74, 0.88] },   // Фокус: короткая корма хэтчбека
+  xc60:     { ws: [0.25, 0.15], roof: [0.41, 0.85], rg: [0.85, 0.93] },   // XC60: большой кроссовер
+};
+function poly(pts) { ctx.beginPath(); ctx.moveTo(pts[0], pts[1]); for (let i = 2; i < pts.length; i += 2) ctx.lineTo(pts[i], pts[i + 1]); ctx.closePath(); ctx.fill(); }
+function drawModel(m, opt) {
+  const w = m.w, l = m.l, x0 = -w / 2, x1 = w / 2, y0 = -l / 2, y1 = l / 2, Y = f => y0 + l * f, S = SHAPES[m.kind];
+  const cross = m.kind === "gs3" || m.kind === "xc60" || m.kind === "wagon";
+  ctx.fillStyle = "rgba(0,0,0,0.3)"; rrect(x0 + 3, y0 + 4, w, l, m.rad); ctx.fill();      // тень
+  const wl = cross ? 11 : 10;
+  for (const fy of [0.17, 0.84]) {                                                       // колёса (+ чёрные арки у кроссоверов)
+    const yy = Y(fy) - wl / 2;
+    if (m.kind === "gs3" || m.kind === "xc60") { ctx.fillStyle = "#2a2d33"; rrect(x0 - 2.5, yy - 3, w + 5, wl + 6, 4); ctx.fill(); }
+    ctx.fillStyle = "#111"; ctx.fillRect(x0 - 2, yy, 4, wl); ctx.fillRect(x1 - 2, yy, 4, wl);
+  }
+  const g = ctx.createLinearGradient(x0, 0, x1, 0);                                      // кузов
+  g.addColorStop(0, m.dark); g.addColorStop(0.28, m.color); g.addColorStop(0.72, m.color); g.addColorStop(1, m.dark);
+  ctx.fillStyle = g; rrect(x0, y0, w, l, m.rad); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,0.2)"; rrect(x0 + 3, y0 + 3, w - 6, l * (S.ws[0] - 0.07), 4); ctx.fill();   // блик капота
+  ctx.strokeStyle = "rgba(0,0,0,0.12)"; ctx.lineWidth = 0.8;                             // рёбра капота
+  ctx.beginPath(); ctx.moveTo(-w * 0.2, y0 + 4); ctx.lineTo(-w * 0.16, Y(S.ws[0]) - 1); ctx.moveTo(w * 0.2, y0 + 4); ctx.lineTo(w * 0.16, Y(S.ws[0]) - 1); ctx.stroke();
+  const glass = "#1c2733", wsA = Y(S.ws[0]), wsB = Y(S.ws[0] + S.ws[1]);
+  ctx.fillStyle = glass; poly([x0 + 2.5, wsA, x1 - 2.5, wsA, x1 - 4, wsB, x0 + 4, wsB]);  // лобовое стекло
+  ctx.fillStyle = "rgba(140,190,230,0.35)"; poly([x0 + 4.5, wsA + 1, x0 + 4.5 + (w - 9) * 0.4, wsA + 1, x0 + 4.5 + (w - 9) * 0.3, wsA + 3.5, x0 + 5, wsA + 3.5]);
+  ctx.fillStyle = glass;                                                                 // боковые стёкла
+  ctx.fillRect(x0 + 1.6, wsB, 2.2, Y(S.rg[0]) - wsB); ctx.fillRect(x1 - 3.8, wsB, 2.2, Y(S.rg[0]) - wsB);
+  ctx.fillStyle = m.roof; rrect(x0 + 3.6, Y(S.roof[0]), w - 7.2, l * (S.roof[1] - S.roof[0]), 3); ctx.fill();   // крыша
+  if (m.kind === "gs3") { ctx.fillStyle = "rgba(255,255,255,0.08)"; rrect(x0 + 5, Y(S.roof[0]) + 2, w - 10, l * 0.1, 2); ctx.fill(); }
+  const rgA = Y(S.rg[0]), rgB = Y(S.rg[1]);                                              // заднее стекло
+  ctx.fillStyle = glass; poly([x0 + 4, rgA, x1 - 4, rgA, x1 - 5, rgB, x0 + 5, rgB]);
+  if (m.kind === "wagon" || m.kind === "xc60") {                                         // рейлинги
+    ctx.fillStyle = m.kind === "wagon" ? "#3a3d42" : "#c3c8ce";
+    ctx.fillRect(x0 + 3.6, Y(S.roof[0] + 0.03), 1.5, l * (S.roof[1] - S.roof[0] - 0.06)); ctx.fillRect(x1 - 5.1, Y(S.roof[0] + 0.03), 1.5, l * (S.roof[1] - S.roof[0] - 0.06));
+  }
+  ctx.fillStyle = m.dark; ctx.fillRect(x0 - 2, Y(S.ws[0] + 0.03), 2.2, 4); ctx.fillRect(x1 - 0.2, Y(S.ws[0] + 0.03), 2.2, 4);   // зеркала
+  // ---- передняя оптика и решётка ----
+  const head = "#eef7ff", red = "#ff1744";
+  if (m.kind === "liftback") {                       // Октавия A7 рест: раздельные «четырёхглазые» фары, широкая решётка
+    ctx.fillStyle = head;
+    poly([x0 + 1.5, y0 + 2.2, x0 + 5.5, y0 + 1.2, x0 + 5.5, y0 + 4.2, x0 + 2, y0 + 5]); poly([x1 - 1.5, y0 + 2.2, x1 - 5.5, y0 + 1.2, x1 - 5.5, y0 + 4.2, x1 - 2, y0 + 5]);
+    ctx.fillRect(x0 + 6.5, y0 + 1.2, 3, 2.6); ctx.fillRect(x1 - 9.5, y0 + 1.2, 3, 2.6);
+    ctx.fillStyle = "#8f969e"; ctx.fillRect(-4.5, y0 + 0.8, 9, 3.2);
+    ctx.fillStyle = "#3b4047"; for (let i = -3; i <= 3; i += 1.5) ctx.fillRect(i - 0.3, y0 + 1.2, 0.6, 2.4);
+    ctx.fillStyle = red;                             // С-образные фонари
+    ctx.fillRect(x0 + 1.5, y1 - 3, 6, 1.8); ctx.fillRect(x0 + 1.5, y1 - 5.5, 1.8, 3); ctx.fillRect(x1 - 7.5, y1 - 3, 6, 1.8); ctx.fillRect(x1 - 3.3, y1 - 5.5, 1.8, 3);
+  } else if (m.kind === "wagon") {                   // Ларгус: крупные фары, решётка с хром-полосой, вертикальные фонари
+    ctx.fillStyle = head; ctx.fillRect(x0 + 1.5, y0 + 1.2, 7, 3.6); ctx.fillRect(x1 - 8.5, y0 + 1.2, 7, 3.6);
+    ctx.fillStyle = "#24272b"; ctx.fillRect(-5.5, y0 + 1.2, 11, 3.4);
+    ctx.fillStyle = "#c9ccd0"; ctx.fillRect(-5.5, y0 + 2.4, 11, 1);
+    ctx.fillStyle = red; ctx.fillRect(x0 + 0.8, Y(0.88), 2.6, l * 0.1); ctx.fillRect(x1 - 3.4, Y(0.88), 2.6, l * 0.1);
+    ctx.fillStyle = "#3a3d42"; ctx.fillRect(x0 + 4, y1 - 2, w - 8, 1.6);                // задняя дверь/бампер
+  } else if (m.kind === "gs3") {                     // GS3: узкие ходовые огни, большая чёрная решётка, сквозной фонарь
+    ctx.fillStyle = "#1b1d21"; rrect(-6.5, y0 + 0.8, 13, 4.4, 1.5); ctx.fill();
+    ctx.fillStyle = head; poly([x0 + 1.5, y0 + 1.5, x0 + 8, y0 + 1, x0 + 7.5, y0 + 2.6, x0 + 2, y0 + 3.2]); poly([x1 - 1.5, y0 + 1.5, x1 - 8, y0 + 1, x1 - 7.5, y0 + 2.6, x1 - 2, y0 + 3.2]);
+    ctx.fillStyle = red; ctx.fillRect(x0 + 2, y1 - 2.6, w - 4, 1.3); ctx.fillRect(x0 + 1.5, y1 - 4, 4.5, 2.6); ctx.fillRect(x1 - 6, y1 - 4, 4.5, 2.6);
+  } else if (m.kind === "focus") {                   // Фокус 2 рест: стреловидные фары, трапеция нижней решётки
+    ctx.fillStyle = head; poly([x0 + 1.5, y0 + 1.2, x0 + 10, y0 + 1.5, x0 + 2, y0 + 7]); poly([x1 - 1.5, y0 + 1.2, x1 - 10, y0 + 1.5, x1 - 2, y0 + 7]);
+    ctx.fillStyle = "#11161f"; poly([-5, y0 + 0.8, 5, y0 + 0.8, 3.5, y0 + 3.6, -3.5, y0 + 3.6]);
+    ctx.fillStyle = red; ctx.fillRect(x0 + 1, Y(0.86), 2.4, l * 0.1); ctx.fillRect(x1 - 3.4, Y(0.86), 2.4, l * 0.1);
+    ctx.fillRect(x0 + 1, y1 - 2.4, 4, 1.6); ctx.fillRect(x1 - 5, y1 - 2.4, 4, 1.6);
+  } else if (m.kind === "xc60") {                    // XC60: фары с Т-образными ходовыми огнями, высокие L-фонари
+    ctx.fillStyle = "#cfe4f5"; ctx.fillRect(x0 + 1.5, y0 + 1.2, 7.5, 3.8); ctx.fillRect(x1 - 9, y0 + 1.2, 7.5, 3.8);
+    ctx.fillStyle = "#fff"; ctx.fillRect(x0 + 2.5, y0 + 2.6, 5.5, 0.9); ctx.fillRect(x0 + 4.8, y0 + 1.5, 0.9, 3.2);
+    ctx.fillRect(x1 - 8, y0 + 2.6, 5.5, 0.9); ctx.fillRect(x1 - 5.7, y0 + 1.5, 0.9, 3.2);
+    ctx.fillStyle = "#1e2126"; ctx.fillRect(-5.5, y0 + 0.8, 11, 4.2);
+    ctx.strokeStyle = "#c3c8ce"; ctx.lineWidth = 0.8; ctx.strokeRect(-5.5, y0 + 0.8, 11, 4.2);
+    ctx.fillStyle = red; ctx.fillRect(x0 + 0.8, Y(0.74), 2.2, l * 0.23); ctx.fillRect(x1 - 3, Y(0.74), 2.2, l * 0.23);
+    ctx.fillRect(x0 + 0.8, y1 - 2.6, 6, 1.8); ctx.fillRect(x1 - 6.8, y1 - 2.6, 6, 1.8);
+  }
+  if (opt && opt.logo && logoOk) {                   // наклейка Aiviro на крыше
+    const lh = l * 0.17, lw = lh * 158 / 256, cy = Y((S.roof[0] + S.roof[1]) / 2);
+    ctx.fillStyle = "rgba(255,255,255,0.92)"; circle(0, cy, lh * 0.62);
+    ctx.drawImage(logo, -lw / 2, cy - lh / 2, lw, lh);
+  }
+}
 function drawTraffic(c) {
   ctx.save(); ctx.translate(CX + c.x, c.y + c.l / 2); ctx.rotate(c.rot);
   if (c.type === "truck") {
@@ -585,8 +744,7 @@ function drawPlayer() {
   // свет фар
   ctx.fillStyle = "rgba(255,250,200,0.10)";
   ctx.beginPath(); ctx.moveTo(-CAR_W / 2 + 4, -CAR_L / 2); ctx.lineTo(-CAR_W / 2 - 10, -CAR_L / 2 - 70); ctx.lineTo(CAR_W / 2 + 10, -CAR_L / 2 - 70); ctx.lineTo(CAR_W / 2 - 4, -CAR_L / 2); ctx.closePath(); ctx.fill();
-  drawCarBody(CAR_W, CAR_L, "#8b56b8", "#4f2a7a", { logo: true });     // фиолетовый Aiviro
-  ctx.fillStyle = "rgba(255,255,255,0.85)"; ctx.fillRect(-2, -CAR_L / 2 + 2, 1.5, CAR_L * 0.22); ctx.fillRect(0.5, -CAR_L / 2 + 2, 1.5, CAR_L * 0.22); // гоночные полосы
+  drawModel(car(), { logo: true });                                    // выбранная машина + наклейка Aiviro
   ctx.restore(); ctx.globalAlpha = 1;
 }
 function drawPickup(p) {
@@ -638,6 +796,12 @@ function drawHUD() {
   textC("очки " + points() + " · обгонов " + overtakes, CX, top + 40, 11.5, "#e1d5ff", 600);
   textC("рекорд " + Math.max(best, 0), CX, top + 54, 10.5, "#b0a6c8", 600);
   for (let i = 0; i < LIVES; i++) heart(CX - 20 + i * 20, top + 80, 8, i < lives);
+  // индикатор плотности потока: 5 делений
+  const lvl = clamp(Math.ceil(dens * 5 - 0.05), 1, 5), dy = top + 99;
+  ctx.fillStyle = "rgba(24,16,40,0.55)"; rrect(CX - 52, dy - 8, 104, 16, 8); ctx.fill();
+  ctx.font = "700 9px -apple-system, Arial"; ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.fillStyle = "#cfc6e6"; ctx.fillText("ПОТОК", CX - 46, dy + 0.5);
+  const segC = ["#66bb6a", "#9ccc65", "#ffca28", "#ffa726", "#ef5350"];
+  for (let i = 0; i < 5; i++) { ctx.fillStyle = i < lvl ? segC[i] : "rgba(255,255,255,0.18)"; rrect(CX - 9 + i * 11.5, dy - 4, 9, 8, 2); ctx.fill(); }
   // спидометр
   const sx = safe.l + 58, sy = H - safe.b - 58, R = 46;
   ctx.fillStyle = "rgba(24,16,40,0.78)"; circle(sx, sy, R);
@@ -669,32 +833,64 @@ function drawLogo(cx, cy, h) {
   ctx.fillStyle = "#fff"; circle(cx, cy, h * 0.62);
   ctx.drawImage(logo, cx - w / 2, cy - h / 2, w, h);
 }
+function statBar(label, v, x, y) {                  // v — 0..1
+  ctx.font = "600 11px -apple-system, Arial"; ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.fillStyle = "#cfc6e6"; ctx.fillText(label, x, y);
+  for (let i = 0; i < 5; i++) { ctx.fillStyle = i < Math.round(1 + v * 4) ? "#b388ff" : "rgba(255,255,255,0.18)"; rrect(x + 50 + i * 13, y - 4, 10, 8, 2); ctx.fill(); }
+}
 function drawStart() {
-  ctx.fillStyle = "rgba(15,10,28,0.45)"; ctx.fillRect(0, 0, W, H);
-  const cy = Math.max(safe.t + 70, H * 0.2);
-  drawLogo(CX, cy, 74);
-  textC("AIVIRO", CX, cy + 74, 40, "#fff", 900, "#3d1f66");
-  textC("RACING", CX, cy + 112, 34, "#c9a6ff", 900, "#3d1f66");
-  const py = cy + 150, ph = 176;
-  panel(CX - 150, py, 300, ph);
-  if (isTouch) {
-    textC("Руль: держи палец слева или справа", CX, py + 26, 13, "#fff", 600);
-    textC("или веди пальцем по экрану", CX, py + 46, 13, "#fff", 600);
-    textC("Нитро — кнопка N₂O справа внизу", CX, py + 72, 13, "#e1d5ff", 600);
-  } else {
-    textC("Руль: ← → или A / D", CX, py + 26, 13, "#fff", 600);
-    textC("Нитро: ↑ или пробел · Пауза: P · Звук: M", CX, py + 48, 12, "#e1d5ff", 600);
-    textC("Мышь: зажми левую или правую половину", CX, py + 70, 12, "#e1d5ff", 600);
+  ctx.fillStyle = "rgba(15,10,28,0.55)"; ctx.fillRect(0, 0, W, H);
+  const avail = H - safe.t - safe.b, top = safe.t + Math.max(4, (avail - 600) / 2);
+  drawLogo(CX, top + 34, 46);
+  textC("AIVIRO RACING", CX, top + 80, 30, "#fff", 900, "#3d1f66");
+  const m = car(), py = top + 104, ph = 292, pw = Math.min(320, W - 24);
+  panel(CX - pw / 2, py, pw, ph);
+  textC("ВЫБЕРИ МАШИНУ · " + (carIdx + 1) + " / " + CARS.length, CX, py + 18, 12, "#c9a6ff", 800);
+  // машина крупно, со сдвигом-анимацией при смене
+  selAnim *= 0.85; if (Math.abs(selAnim) < 0.01) selAnim = 0;
+  const sc = 2.15, cy = py + 100;
+  ctx.fillStyle = "rgba(255,255,255,0.05)"; rrect(CX - 46, py + 32, 92, 136, 12); ctx.fill();
+  ctx.save(); ctx.translate(CX + selAnim * 40, cy + Math.sin(animT * 2) * 1.5); ctx.scale(sc, sc); ctx.globalAlpha = 1 - Math.abs(selAnim) * 0.8;
+  drawModel(m, { logo: true }); ctx.restore(); ctx.globalAlpha = 1;
+  // стрелки
+  const ar = 24, ay = cy;
+  ui.left = { x: CX - pw / 2 + 6, y: ay - 34, w: 60, h: 68 }; ui.right = { x: CX + pw / 2 - 66, y: ay - 34, w: 60, h: 68 };
+  for (const [r, d] of [[ui.left, -1], [ui.right, 1]]) {
+    const ax = r.x + r.w / 2;
+    ctx.fillStyle = "rgba(179,136,255,0.25)"; circle(ax, ay, ar);
+    ctx.strokeStyle = "rgba(225,213,255,0.8)"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(ax, ay, ar, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = "#fff"; poly([ax + 6 * d, ay, ax - 5 * d, ay - 9, ax - 5 * d, ay + 9]);
   }
-  textC("Обгоняй, собирай монеты, береги 3 жизни", CX, py + 98, 12, "#cfc6e6", 600);
-  textC("Рекорд: " + best, CX, py + 124, 15, "#ffe082", 800);
-  const blink = 0.6 + 0.4 * Math.sin(animT * 4);
-  ctx.globalAlpha = blink; textC(isTouch ? "Коснись, чтобы начать" : "Нажми ПРОБЕЛ", CX, py + 154, 18, "#fff", 800); ctx.globalAlpha = 1;
-  textC("Карайкоз Н. В.", CX, H - safe.b - 18, 10, "rgba(255,255,255,0.6)", 600);
+  textC(m.name, CX, py + 186, 19, "#fff", 900);
+  textC(m.colorName + " · " + m.sub, CX, py + 206, 12.5, "#e1d5ff", 600);
+  textC(m.lat, CX, py + 222, 10, "#9a8fb5", 600);
+  const sx = CX - 122;
+  statBar("Разгон", (m.acc - 0.93) / 0.15, sx, py + 242);
+  statBar("Руль", (m.steer - 0.92) / 0.15, sx + 128, py + 242);
+  textC(m.trait, CX, py + 262, 11, "#ffe082", 700);
+  for (let i = 0; i < CARS.length; i++) { ctx.fillStyle = i === carIdx ? "#fff" : "rgba(255,255,255,0.3)"; circle(CX - 24 + i * 12, py + 280, i === carIdx ? 3.5 : 2.5); }
+  // кнопка «Поехали»
+  const by = py + ph + 14, bw = 220, bh = 54;
+  ui.go = { x: CX - bw / 2, y: by, w: bw, h: bh };
+  const pulse = 1 + 0.03 * Math.sin(animT * 4);
+  ctx.save(); ctx.translate(CX, by + bh / 2); ctx.scale(pulse, pulse);
+  const bg = ctx.createLinearGradient(0, -bh / 2, 0, bh / 2); bg.addColorStop(0, "#a479e0"); bg.addColorStop(1, "#6a3fa0");
+  ctx.fillStyle = bg; rrect(-bw / 2, -bh / 2, bw, bh, 16); ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.6)"; ctx.lineWidth = 2; rrect(-bw / 2, -bh / 2, bw, bh, 16); ctx.stroke();
+  textC("ПОЕХАЛИ!", 0, 1, 22, "#fff", 900); ctx.restore();
+  const hy = by + bh + 22;
+  if (isTouch) {
+    textC("Листай стрелками или свайпом · руль — палец слева/справа", CX, hy, 11, "#e1d5ff", 600);
+    textC("Нитро — кнопка N₂O · поток со временем плотнее", CX, hy + 17, 11, "#cfc6e6", 600);
+  } else {
+    textC("← → — выбор машины · ПРОБЕЛ — старт", CX, hy, 11.5, "#e1d5ff", 600);
+    textC("Руль: ← → / A D · Нитро: ↑ / пробел · P — пауза", CX, hy + 17, 11, "#cfc6e6", 600);
+  }
+  textC("Рекорд: " + best, CX, hy + 40, 15, "#ffe082", 800);
+  textC("Карайкоз Н. В.", CX, H - safe.b - 12, 10, "rgba(255,255,255,0.6)", 600);
 }
 function drawOver() {
   ctx.fillStyle = "rgba(15,10,28,0.5)"; ctx.fillRect(0, 0, W, H);
-  const ph = 250, py = Math.max(safe.t + 110, H * 0.5 - ph / 2 - 20);
+  const ph = 300, py = Math.max(safe.t + 110, H * 0.5 - ph / 2 - 20);
   panel(CX - 145, py, 290, ph);
   textC("АВАРИЯ!", CX, py + 34, 30, "#ff5252", 900, "#2a0d0d");
   textC("Игра окончена", CX, py + 64, 14, "#cfc6e6", 600);
@@ -706,6 +902,10 @@ function drawOver() {
     ctx.globalAlpha = 0.6 + 0.4 * Math.sin(animT * 4);
     textC(isTouch ? "Коснись, чтобы ехать снова" : "ПРОБЕЛ — ещё раз", CX, py + 222, 16, "#fff", 800); ctx.globalAlpha = 1;
   }
+  ui.change = { x: CX - 100, y: py + 246, w: 200, h: 40 };
+  ctx.fillStyle = "rgba(179,136,255,0.25)"; rrect(ui.change.x, ui.change.y, 200, 40, 12); ctx.fill();
+  ctx.strokeStyle = "rgba(225,213,255,0.8)"; ctx.lineWidth = 1.5; rrect(ui.change.x, ui.change.y, 200, 40, 12); ctx.stroke();
+  textC(isTouch ? "Сменить машину" : "Сменить машину (C)", CX, py + 266, 15, "#fff", 800);
 }
 function drawPaused() {
   ctx.fillStyle = "rgba(15,10,28,0.55)"; ctx.fillRect(0, 0, W, H);
@@ -721,7 +921,6 @@ function draw() {
   for (const p of pickups) drawPickup(p);
   for (const c of traffic) drawTraffic(c);
   if (state !== "start") drawPlayer();
-  else { player.x = 0; player.ang = Math.sin(animT * 1.5) * 0.03; drawPlayer(); }
   drawParticles();
   for (const s of scenery) drawSceneryTop(s);
   if (nitroT > 0 && state === "playing") {                // линии скорости
@@ -754,6 +953,7 @@ function loop(now) {
   draw();
   requestAnimationFrame(loop);
 }
+applyCar();
 resize();
 updateButtons();
 requestAnimationFrame(t => { lastTime = t; requestAnimationFrame(loop); });
